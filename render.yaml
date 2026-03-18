@@ -1,9 +1,10 @@
 services:
   - type: web
-    name: grok2api
+    name: grok2me-newapi
     env: docker
     plan: free
     autoDeploy: false
+    healthCheckPath: /health
     dockerfilePath: ./Dockerfile
     dockerContext: .
     envVars:
@@ -11,6 +12,12 @@ services:
         value: Asia/Shanghai
       - key: LOG_LEVEL
         value: INFO
+      - key: LOG_FILE_ENABLED
+        value: "false"
+      - key: DATA_DIR
+        value: /tmp/data
+      - key: LOG_DIR
+        value: /tmp/logs
       - key: SERVER_STORAGE_TYPE
         value: local
       - key: SERVER_STORAGE_URL
