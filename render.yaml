@@ -15,9 +15,9 @@ services:
       - key: LOG_FILE_ENABLED
         value: "false"
       - key: DATA_DIR
-        value: /tmp/data
+        value: /var/data/data
       - key: LOG_DIR
-        value: /tmp/logs
+        value: /var/data/logs
       - key: SERVER_STORAGE_TYPE
         value: local
       - key: SERVER_STORAGE_URL

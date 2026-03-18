@@ -60,6 +60,9 @@ docker compose up -d
 >
 > 仓库内已包含 `render.yaml`，可直接从当前仓库一键部署。
 >
+> 如已在 Render 挂载持久化磁盘到 `/var/data`，默认会使用：
+> `DATA_DIR=/var/data/data`、`LOG_DIR=/var/data/logs`。
+>
 > 持久化请使用 MySQL / Redis / PostgreSQL，并设置：`SERVER_STORAGE_TYPE` 与 `SERVER_STORAGE_URL`。
 
 <br>

@@ -60,6 +60,9 @@ docker compose up -d
 >
 > This repo already includes `render.yaml`, so you can deploy directly from this fork.
 >
+> If you've mounted a persistent disk at `/var/data` on Render, the default paths are:
+> `DATA_DIR=/var/data/data` and `LOG_DIR=/var/data/logs`.
+>
 > For persistence, use MySQL / Redis / PostgreSQL and set `SERVER_STORAGE_TYPE` and `SERVER_STORAGE_URL`.
 
 <br>
