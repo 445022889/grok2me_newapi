@@ -8,11 +8,13 @@ import asyncio
 import base64
 import hashlib
 import os
+import time
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 import aiofiles
+import orjson
 
 from app.core.logger import logger
 from app.core.storage import DATA_DIR
@@ -21,6 +23,46 @@ from app.core.exceptions import AppException
 from app.services.reverse.assets_download import AssetsDownloadReverse
 from app.services.reverse.utils.session import ResettableSession
 from app.services.grok.utils.locks import _get_download_semaphore, _file_lock
+
+
+class VideoCacheMetadataStore:
+    """Persist video cache metadata for original-token refill."""
+
+    def __init__(self):
+        self.path = DATA_DIR / "video_cache_map.json"
+
+    async def get(self, cache_name: str) -> Optional[Dict[str, Any]]:
+        data = await self._load_all()
+        item = data.get(cache_name)
+        return item if isinstance(item, dict) else None
+
+    async def put(self, cache_name: str, asset_path: str, token: str):
+        async with _file_lock("video_cache_metadata", timeout=10):
+            data = await self._load_all()
+            data[cache_name] = {
+                "asset_path": asset_path,
+                "token": token,
+                "updated_at": int(time.time()),
+            }
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            temp_path = self.path.with_suffix(".tmp")
+            async with aiofiles.open(temp_path, "wb") as f:
+                await f.write(orjson.dumps(data, option=orjson.OPT_INDENT_2))
+            os.replace(temp_path, self.path)
+
+    async def _load_all(self) -> Dict[str, Any]:
+        if not self.path.exists():
+            return {}
+        try:
+            async with aiofiles.open(self.path, "rb") as f:
+                raw = await f.read()
+            if not raw:
+                return {}
+            data = orjson.loads(raw)
+            return data if isinstance(data, dict) else {}
+        except Exception as e:
+            logger.warning(f"Failed to load video cache metadata: {e}")
+            return {}
 
 
 class DownloadService:
@@ -34,6 +76,7 @@ class DownloadService:
         self.image_dir.mkdir(parents=True, exist_ok=True)
         self.video_dir.mkdir(parents=True, exist_ok=True)
         self._cleanup_running = False
+        self._video_meta = VideoCacheMetadataStore()
 
     async def create(self) -> ResettableSession:
         """Create or reuse a session."""
@@ -223,11 +266,26 @@ class DownloadService:
                 mime = response.headers.get(
                     "content-type", "application/octet-stream"
                 ).split(";")[0]
+                if media_type == "video":
+                    await self._video_meta.put(cache_path.name, file_path, token)
                 logger.info(f"Downloaded: {file_path}")
 
                 asyncio.create_task(self._check_limit())
 
             return cache_path, mime
+
+    async def refill_video_cache_by_name(self, cache_name: str) -> Optional[Path]:
+        item = await self._video_meta.get(cache_name)
+        if not item:
+            return None
+
+        asset_path = item.get("asset_path")
+        token = item.get("token")
+        if not isinstance(asset_path, str) or not isinstance(token, str):
+            return None
+
+        cache_path, _ = await self.download_file(asset_path, token, "video")
+        return cache_path
 
     async def _check_limit(self):
         """Check cache limit and cleanup.
