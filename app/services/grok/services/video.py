@@ -223,6 +223,28 @@ def _new_session() -> ResettableSession:
     return ResettableSession()
 
 
+def _has_mp4_url(video_url: str) -> bool:
+    if not isinstance(video_url, str):
+        return False
+    candidate = video_url.strip()
+    if not candidate:
+        return False
+    base = candidate.split("?", 1)[0].split("#", 1)[0].lower()
+    return base.endswith(".mp4")
+
+
+async def _collect_stream_chunks(stream: AsyncIterable[str]) -> List[str]:
+    chunks: List[str] = []
+    async for chunk in stream:
+        chunks.append(chunk)
+    return chunks
+
+
+async def _replay_stream_chunks(chunks: List[str]) -> AsyncGenerator[str, None]:
+    for chunk in chunks:
+        yield chunk
+
+
 class VideoService:
     """Video generation service."""
 
@@ -381,6 +403,7 @@ class VideoService:
         model: str,
         messages: list,
         stream: bool = None,
+        strict_stream_success: bool = False,
         reasoning_effort: str | None = None,
         aspect_ratio: str = "3:2",
         video_length: int = 6,
@@ -498,8 +521,22 @@ class VideoService:
                             show_think,
                             upscale_on_finish=should_upscale,
                         )
+                        stream_result = processor.process(response)
+                        if strict_stream_success:
+                            chunks = await _collect_stream_chunks(stream_result)
+                            try:
+                                await token_mgr.consume(token, effort)
+                                logger.debug(
+                                    "Video strict stream completed, recorded usage "
+                                    f"(effort={effort.value})"
+                                )
+                            except Exception as e:
+                                logger.warning(
+                                    f"Failed to record video strict stream usage: {e}"
+                                )
+                            return _replay_stream_chunks(chunks)
                         return wrap_stream_with_usage(
-                            processor.process(response), token_mgr, token, model
+                            stream_result, token_mgr, token, model
                         )
 
                     result = await VideoCollectProcessor(
@@ -628,8 +665,22 @@ class VideoService:
                         show_think,
                         upscale_on_finish=should_upscale,
                     )
+                    stream_result = processor.process(final_response)
+                    if strict_stream_success:
+                        chunks = await _collect_stream_chunks(stream_result)
+                        try:
+                            await token_mgr.consume(token, effort)
+                            logger.debug(
+                                "Video strict stream completed, recorded usage "
+                                f"(effort={effort.value})"
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                f"Failed to record video strict stream usage: {e}"
+                            )
+                        return _replay_stream_chunks(chunks)
                     return wrap_stream_with_usage(
-                        processor.process(final_response), token_mgr, token, model
+                        stream_result, token_mgr, token, model
                     )
 
                 result = await VideoCollectProcessor(
@@ -677,6 +728,8 @@ class VideoStreamProcessor(BaseProcessor):
     ):
         super().__init__(model, token)
         self.response_id: Optional[str] = None
+        self.final_video_url: str = ""
+        self.saw_completion_event: bool = False
         self.think_opened: bool = False
         self.think_closed_once: bool = False
         self.role_sent: bool = False
@@ -800,6 +853,7 @@ class VideoStreamProcessor(BaseProcessor):
                         yield self._sse(f"正在生成视频中，当前进度{progress}%\n")
 
                     if progress == 100:
+                        self.saw_completion_event = True
                         video_url = video_resp.get("videoUrl", "")
                         thumbnail_url = video_resp.get("thumbnailImageUrl", "")
 
@@ -812,14 +866,38 @@ class VideoStreamProcessor(BaseProcessor):
                             if self.upscale_on_finish:
                                 yield self._sse("正在对视频进行超分辨率\n")
                                 video_url = await self._upscale_video_url(video_url)
-                            dl_service = self._get_dl()
-                            rendered = await dl_service.render_video(
-                                video_url, self.token, thumbnail_url
-                            )
-                            yield self._sse(rendered)
-
-                            logger.info(f"Video generated: {video_url}")
+                            if _has_mp4_url(video_url):
+                                self.final_video_url = video_url
+                                dl_service = self._get_dl()
+                                rendered = await dl_service.render_video(
+                                    video_url, self.token, thumbnail_url
+                                )
+                                yield self._sse(rendered)
+                                logger.info(f"Video generated: {video_url}")
+                            else:
+                                logger.warning(
+                                    "Video completion event missing mp4 url",
+                                    extra={
+                                        "model": self.model,
+                                        "response_id": self.response_id,
+                                        "video_url": video_url,
+                                    },
+                                )
                     continue
+
+            if not self.final_video_url:
+                err_type = (
+                    "missing_mp4_url"
+                    if self.saw_completion_event
+                    else "empty_video_stream"
+                )
+                raise UpstreamException(
+                    message="Video generation did not return a final mp4 url",
+                    details={
+                        "type": err_type,
+                        "response_id": self.response_id,
+                    },
+                )
 
             if self.think_opened:
                 yield self._sse("</think>\n")
@@ -863,6 +941,7 @@ class VideoStreamProcessor(BaseProcessor):
                 f"Video stream processing error: {e}",
                 extra={"model": self.model, "error_type": type(e).__name__},
             )
+            raise
         finally:
             await self.close()
 
@@ -911,6 +990,8 @@ class VideoCollectProcessor(BaseProcessor):
         """Process and collect video response."""
         response_id = ""
         content = ""
+        final_video_url = ""
+        saw_completion_event = False
         idle_timeout = get_config("video.stream_timeout")
 
         try:
@@ -927,6 +1008,7 @@ class VideoCollectProcessor(BaseProcessor):
 
                 if video_resp := resp.get("streamingVideoGenerationResponse"):
                     if video_resp.get("progress") == 100:
+                        saw_completion_event = True
                         response_id = resp.get("responseId", "")
                         video_url = video_resp.get("videoUrl", "")
                         thumbnail_url = video_resp.get("thumbnailImageUrl", "")
@@ -934,19 +1016,37 @@ class VideoCollectProcessor(BaseProcessor):
                         if video_url:
                             if self.upscale_on_finish:
                                 video_url = await self._upscale_video_url(video_url)
-                            dl_service = self._get_dl()
-                            content = await dl_service.render_video(
-                                video_url, self.token, thumbnail_url
-                            )
-                            logger.info(f"Video generated: {video_url}")
+                            if _has_mp4_url(video_url):
+                                final_video_url = video_url
+                                dl_service = self._get_dl()
+                                content = await dl_service.render_video(
+                                    video_url, self.token, thumbnail_url
+                                )
+                                logger.info(f"Video generated: {video_url}")
+                            else:
+                                logger.warning(
+                                    "Video completion event missing mp4 url",
+                                    extra={
+                                        "model": self.model,
+                                        "response_id": response_id,
+                                        "video_url": video_url,
+                                    },
+                                )
 
         except asyncio.CancelledError:
             logger.debug(
                 "Video collect cancelled by client", extra={"model": self.model}
             )
+            raise
         except StreamIdleTimeoutError as e:
-            logger.warning(
-                f"Video collect idle timeout: {e}", extra={"model": self.model}
+            raise UpstreamException(
+                message=f"Video collect idle timeout after {e.idle_seconds}s",
+                status_code=504,
+                details={
+                    "error": str(e),
+                    "type": "stream_idle_timeout",
+                    "idle_seconds": e.idle_seconds,
+                },
             )
         except RequestsError as e:
             if _is_http2_error(e):
@@ -954,17 +1054,34 @@ class VideoCollectProcessor(BaseProcessor):
                     f"HTTP/2 stream error in video collect: {e}",
                     extra={"model": self.model},
                 )
-            else:
-                logger.error(
-                    f"Video collect request error: {e}", extra={"model": self.model}
+                raise UpstreamException(
+                    message="Upstream connection closed unexpectedly",
+                    status_code=502,
+                    details={"error": str(e), "type": "http2_stream_error"},
                 )
+            logger.error(
+                f"Video collect request error: {e}", extra={"model": self.model}
+            )
+            raise UpstreamException(
+                message=f"Upstream request failed: {e}",
+                status_code=502,
+                details={"error": str(e)},
+            )
         except Exception as e:
             logger.error(
                 f"Video collect processing error: {e}",
                 extra={"model": self.model, "error_type": type(e).__name__},
             )
+            raise
         finally:
             await self.close()
+
+        if not final_video_url:
+            err_type = "missing_mp4_url" if saw_completion_event else "empty_video_stream"
+            raise UpstreamException(
+                message="Video generation did not return a final mp4 url",
+                details={"type": err_type, "response_id": response_id},
+            )
 
         return {
             "id": response_id,

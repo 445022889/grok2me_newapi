@@ -819,21 +819,17 @@ async def chat_completions(request: ChatCompletionRequest):
         # 提取视频配置 (默认值在 Pydantic 模型中处理)
         v_conf = request.video_config or VideoConfig()
 
-        try:
-            result = await VideoService.completions(
-                model=request.model,
-                messages=[msg.model_dump() for msg in request.messages],
-                stream=request.stream,
-                reasoning_effort=request.reasoning_effort,
-                aspect_ratio=v_conf.aspect_ratio,
-                video_length=v_conf.video_length,
-                resolution=v_conf.resolution_name,
-                preset=v_conf.preset,
-            )
-        except Exception as e:
-            if request.stream is not False:
-                return _streaming_error_response(e)
-            raise
+        result = await VideoService.completions(
+            model=request.model,
+            messages=[msg.model_dump() for msg in request.messages],
+            stream=request.stream,
+            strict_stream_success=request.stream is not False,
+            reasoning_effort=request.reasoning_effort,
+            aspect_ratio=v_conf.aspect_ratio,
+            video_length=v_conf.video_length,
+            resolution=v_conf.resolution_name,
+            preset=v_conf.preset,
+        )
     else:
         try:
             result = await ChatService.completions(
