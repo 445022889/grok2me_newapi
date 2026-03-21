@@ -82,6 +82,12 @@ auto_refresh = true
 refresh_interval_hours = 8
 # Super Token 刷新间隔（小时）
 super_refresh_interval_hours = 2
+# 是否启用 ssoSuper 周期性额度重置
+super_periodic_reset_enabled = true
+# ssoSuper 周期性额度重置间隔（分钟）
+super_periodic_reset_interval_minutes = 30
+# ssoSuper 周期性额度重置目标值
+super_periodic_reset_quota = 140
 # Token 连续失败阈值
 fail_threshold = 5
 # Token 变更保存延迟（毫秒）

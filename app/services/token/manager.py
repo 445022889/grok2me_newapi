@@ -29,6 +29,8 @@ DEFAULT_REFRESH_INTERVAL_HOURS = 8
 DEFAULT_RELOAD_INTERVAL_SEC = 30
 DEFAULT_SAVE_DELAY_MS = 500
 DEFAULT_USAGE_FLUSH_INTERVAL_SEC = 5
+DEFAULT_SUPER_PERIODIC_RESET_INTERVAL_MINUTES = 30
+DEFAULT_SUPER_PERIODIC_RESET_QUOTA = SUPER_DEFAULT_QUOTA
 SUPER_WINDOW_THRESHOLD_SECONDS = 14400
 
 SUPER_POOL_NAME = "ssoSuper"
@@ -794,6 +796,46 @@ class TokenManager:
 
         await self._save(force=True)
         logger.info(f"Reset all: {count} tokens updated")
+
+    async def reset_pool_quota(
+        self,
+        pool_name: str,
+        quota: int,
+        *,
+        skip_statuses: Optional[Set[TokenStatus]] = None,
+    ) -> Dict[str, int]:
+        """批量重置指定池的配额，默认跳过 disabled/expired token。"""
+        pool = self.pools.get(pool_name)
+        if not pool:
+            logger.warning(f"Pool '{pool_name}' not found for quota reset")
+            return {"total": 0, "updated": 0, "skipped": 0}
+
+        target_quota = max(0, int(quota))
+        excluded = skip_statuses or {TokenStatus.DISABLED, TokenStatus.EXPIRED}
+        updated = 0
+        skipped = 0
+
+        for token in pool:
+            if token.status in excluded:
+                skipped += 1
+                continue
+
+            changed = token.quota != target_quota or token.status != TokenStatus.ACTIVE
+            token.quota = target_quota
+            token.status = TokenStatus.ACTIVE
+
+            if changed:
+                self._track_token_change(token, pool_name, "state")
+                updated += 1
+
+        if updated:
+            await self._save(force=True)
+
+        logger.info(
+            f"Pool '{pool_name}': quota reset to {target_quota} "
+            f"(updated={updated}, skipped={skipped}, total={pool.count()})"
+        )
+        return {"total": pool.count(), "updated": updated, "skipped": skipped}
 
     async def reset_token(self, token_str: str) -> bool:
         """
