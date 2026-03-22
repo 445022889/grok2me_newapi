@@ -166,27 +166,44 @@ class LocalStorage(BaseStorage):
     """
 
     def __init__(self):
-        self._lock = asyncio.Lock()
+        self._locks_guard = asyncio.Lock()
+        self._named_locks: dict[str, asyncio.Lock] = {}
+
+    async def _get_named_lock(self, name: str) -> asyncio.Lock:
+        async with self._locks_guard:
+            lock = self._named_locks.get(name)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._named_locks[name] = lock
+            return lock
 
     @asynccontextmanager
     async def acquire_lock(self, name: str, timeout: int = 10):
+        named_lock = await self._get_named_lock(name)
+        acquired_named_lock = False
+        start = time.monotonic()
+
+        try:
+            await asyncio.wait_for(named_lock.acquire(), timeout=timeout)
+            acquired_named_lock = True
+        except asyncio.TimeoutError:
+            logger.warning(f"LocalStorage: 获取锁 '{name}' 超时 ({timeout}s)")
+            raise StorageError(f"无法获取锁 '{name}'")
+
         if fcntl is None:
             try:
-                async with asyncio.timeout(timeout):
-                    async with self._lock:
-                        yield
-            except asyncio.TimeoutError:
-                logger.warning(f"LocalStorage: 获取锁 '{name}' 超时 ({timeout}s)")
-                raise StorageError(f"无法获取锁 '{name}'")
+                yield
+            finally:
+                if acquired_named_lock and named_lock.locked():
+                    named_lock.release()
             return
 
         lock_path = LOCK_DIR / f"{name}.lock"
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         fd = None
         locked = False
-        start = time.monotonic()
 
-        async with self._lock:
+        try:
             try:
                 fd = open(lock_path, "a+")
                 while True:
@@ -202,17 +219,19 @@ class LocalStorage(BaseStorage):
             except StorageError:
                 logger.warning(f"LocalStorage: 获取锁 '{name}' 超时 ({timeout}s)")
                 raise
-            finally:
-                if fd:
-                    if locked:
-                        try:
-                            fcntl.flock(fd, fcntl.LOCK_UN)
-                        except Exception:
-                            pass
+        finally:
+            if fd:
+                if locked:
                     try:
-                        fd.close()
+                        fcntl.flock(fd, fcntl.LOCK_UN)
                     except Exception:
                         pass
+                try:
+                    fd.close()
+                except Exception:
+                    pass
+            if acquired_named_lock and named_lock.locked():
+                named_lock.release()
 
     async def load_config(self) -> Dict[str, Any]:
         if not CONFIG_FILE.exists():
