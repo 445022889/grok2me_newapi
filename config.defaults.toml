@@ -88,6 +88,8 @@ super_periodic_reset_enabled = true
 super_periodic_reset_interval_minutes = 15
 # ssoSuper 周期性额度重置目标值
 super_periodic_reset_quota = 140
+# 视频成功统计 Redis（留空则关闭统计）
+video_stats_redis_url = ""
 # Token 连续失败阈值
 fail_threshold = 5
 # Token 变更保存延迟（毫秒）

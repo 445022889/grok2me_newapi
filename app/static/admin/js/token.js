@@ -12,11 +12,13 @@ let currentBatchTaskId = null;
 let batchEventSource = null;
 let currentPage = 1;
 let pageSize = 50;
+let tokenSettings = null;
 
 const byId = (id) => document.getElementById(id);
 const qsa = (selector) => document.querySelectorAll(selector);
 const DEFAULT_QUOTA_BASIC = 80;
 const DEFAULT_QUOTA_SUPER = 140;
+const DEFAULT_SUPER_RESET_INTERVAL_MINUTES = 15;
 
 function getDefaultQuotaForPool(pool) {
   return pool === 'ssoSuper' ? DEFAULT_QUOTA_SUPER : DEFAULT_QUOTA_BASIC;
@@ -111,7 +113,93 @@ async function init() {
   if (apiKey === null) return;
   setupEditPoolDefaults();
   setupConfirmDialog();
-  loadData();
+  await Promise.all([loadTokenSettings(), loadData()]);
+}
+
+async function loadTokenSettings() {
+  try {
+    const res = await fetch('/v1/admin/tokens/settings', {
+      headers: buildAuthHeaders(apiKey)
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await readJsonResponse(res);
+    tokenSettings = data && data.settings ? data.settings : null;
+    if (!tokenSettings) return;
+    const enabled = byId('super-reset-enabled');
+    const interval = byId('super-reset-interval');
+    const quota = byId('super-reset-quota');
+    const redisUrl = byId('video-stats-redis-url');
+    if (enabled) enabled.checked = !!tokenSettings.super_periodic_reset_enabled;
+    if (interval) interval.value = tokenSettings.super_periodic_reset_interval_minutes ?? DEFAULT_SUPER_RESET_INTERVAL_MINUTES;
+    if (quota) quota.value = tokenSettings.super_periodic_reset_quota ?? DEFAULT_QUOTA_SUPER;
+    if (redisUrl) redisUrl.value = tokenSettings.video_stats_redis_url || '';
+  } catch (e) {
+    showToast(t('token.settingsLoadFailed', { msg: e.message }), 'error');
+  }
+}
+
+async function saveTokenSettings() {
+  const enabled = !!(byId('super-reset-enabled') && byId('super-reset-enabled').checked);
+  const interval = parseInt(byId('super-reset-interval')?.value || '', 10);
+  const quota = parseInt(byId('super-reset-quota')?.value || '', 10);
+  const redisUrl = (byId('video-stats-redis-url')?.value || '').trim();
+
+  if (!interval || interval < 1) {
+    return showToast(t('token.settingsIntervalInvalid'), 'error');
+  }
+  if (Number.isNaN(quota) || quota < 0) {
+    return showToast(t('token.settingsQuotaInvalid'), 'error');
+  }
+
+  const button = byId('save-token-settings-btn');
+  if (button) button.disabled = true;
+  try {
+    const res = await fetch('/v1/admin/tokens/settings', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...buildAuthHeaders(apiKey)
+      },
+      body: JSON.stringify({
+        super_periodic_reset_enabled: enabled,
+        super_periodic_reset_interval_minutes: interval,
+        super_periodic_reset_quota: quota,
+        video_stats_redis_url: redisUrl
+      })
+    });
+    const data = await readJsonResponse(res);
+    if (!res.ok || !data || data.status !== 'success') {
+      throw new Error((data && (data.detail || data.message)) || t('common.saveFailed'));
+    }
+    tokenSettings = data.settings || null;
+    showToast(t('token.settingsSaved'), 'success');
+  } catch (e) {
+    showToast(t('token.settingsSaveFailed', { msg: e.message }), 'error');
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+async function triggerImmediateSuperReset() {
+  const button = byId('super-reset-now-btn');
+  if (button) button.disabled = true;
+  try {
+    const res = await fetch('/v1/admin/tokens/super-reset', {
+      method: 'POST',
+      headers: buildAuthHeaders(apiKey)
+    });
+    const data = await readJsonResponse(res);
+    if (!res.ok || !data || data.status !== 'success') {
+      throw new Error((data && (data.detail || data.message)) || t('common.requestFailed'));
+    }
+    const updated = data.result && typeof data.result.updated === 'number' ? data.result.updated : 0;
+    showToast(t('token.resetNowDone', { updated, quota: data.quota ?? 0 }), 'success');
+    await loadData();
+  } catch (e) {
+    showToast(t('token.resetNowFailed', { msg: e.message }), 'error');
+  } finally {
+    if (button) button.disabled = false;
+  }
 }
 
 async function loadData() {
@@ -144,7 +232,7 @@ function processTokens(data) {
       tokens.forEach(t => {
         // Normalize
         const tObj = typeof t === 'string'
-          ? { token: t, status: 'active', quota: 0, note: '', use_count: 0, tags: [] }
+          ? { token: t, status: 'active', quota: 0, note: '', use_count: 0, video_success_24h: 0, tags: [] }
           : {
             token: t.token,
             status: t.status || 'active',
@@ -152,6 +240,7 @@ function processTokens(data) {
             note: t.note || '',
             fail_count: t.fail_count || 0,
             use_count: t.use_count || 0,
+            video_success_24h: t.video_success_24h || 0,
             tags: t.tags || [],
             created_at: t.created_at,
             last_used_at: t.last_used_at,
@@ -293,6 +382,11 @@ function renderTable() {
     tdQuota.className = 'text-center font-mono text-xs';
     tdQuota.innerText = item.quota;
 
+    // 24h video success (Center)
+    const tdVideoSuccess = document.createElement('td');
+    tdVideoSuccess.className = 'text-center font-mono text-xs';
+    tdVideoSuccess.innerText = Number(item.video_success_24h || 0);
+
     // Note (Left)
     const tdNote = document.createElement('td');
     tdNote.className = 'text-left text-gray-500 text-xs truncate max-w-[150px]';
@@ -331,6 +425,7 @@ function renderTable() {
     tr.appendChild(tdType);
     tr.appendChild(tdStatus);
     tr.appendChild(tdQuota);
+    tr.appendChild(tdVideoSuccess);
     tr.appendChild(tdNote);
     tr.appendChild(tdActions);
 
@@ -637,29 +732,48 @@ function closeImportModal() {
 async function submitImport() {
   const pool = byId('import-pool').value.trim() || 'ssoBasic';
   const text = byId('import-text').value;
-  const lines = text.split('\n');
-  const defaultQuota = getDefaultQuotaForPool(pool);
+  const lines = text
+    .split('\n')
+    .map(line => line.trim())
+    .filter(Boolean);
+  if (lines.length === 0) {
+    return showToast(t('token.tokenEmpty'), 'error');
+  }
 
-  lines.forEach(line => {
-    const t = line.trim();
-    if (t && !flatTokens.some(ft => ft.token === t)) {
-      flatTokens.push({
-        token: t,
-        pool: pool,
-        status: 'active',
-        quota: defaultQuota,
-        note: '',
-        tags: [],
-        fail_count: 0,
-        use_count: 0,
-        _selected: false
-      });
+  const button = document.querySelector('#import-modal .geist-button');
+  if (button) button.disabled = true;
+  try {
+    const res = await fetch('/v1/admin/tokens/import', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...buildAuthHeaders(apiKey)
+      },
+      body: JSON.stringify({
+        pool_name: pool,
+        tokens: lines,
+        quota: getDefaultQuotaForPool(pool)
+      })
+    });
+    const data = await readJsonResponse(res);
+    if (!res.ok || !data || data.status !== 'success') {
+      throw new Error((data && (data.detail || data.message)) || t('common.requestFailed'));
     }
-  });
-
-  await syncToServer();
-  closeImportModal();
-  loadData();
+    const summary = data.summary || {};
+    showToast(
+      t('token.importDone', {
+        imported: summary.imported || 0,
+        skipped: summary.skipped || 0
+      }),
+      'success'
+    );
+    closeImportModal();
+    await loadData();
+  } catch (e) {
+    showToast(t('token.importFailed', { msg: e.message }), 'error');
+  } finally {
+    if (button) button.disabled = false;
+  }
 }
 
 // Export Logic

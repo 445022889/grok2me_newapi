@@ -1,4 +1,5 @@
 import asyncio
+from copy import deepcopy
 
 import orjson
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -6,13 +7,75 @@ from fastapi.responses import StreamingResponse
 
 from app.core.auth import get_app_key, verify_app_key
 from app.core.batch import create_task, expire_task, get_task
+from app.core.config import config, get_config
 from app.core.logger import logger
 from app.core.storage import get_storage
 from app.services.grok.batch_services.usage import UsageService
 from app.services.grok.batch_services.nsfw import NSFWService
-from app.services.token.manager import get_token_manager
+from app.services.token.manager import (
+    DEFAULT_SUPER_PERIODIC_RESET_INTERVAL_MINUTES,
+    DEFAULT_SUPER_PERIODIC_RESET_QUOTA,
+    SUPER_POOL_NAME,
+    get_token_manager,
+)
+from app.services.token.video_stats import VideoStatsService
 
 router = APIRouter()
+
+
+def _normalize_token_value(value) -> str:
+    token = str(value or "").strip()
+    if token.startswith("sso="):
+        token = token[4:]
+    return token
+
+
+def _iter_token_items(tokens_data: dict):
+    for pool_name, tokens in (tokens_data or {}).items():
+        if not isinstance(tokens, list):
+            continue
+        for item in tokens:
+            if isinstance(item, str):
+                token_data = {"token": _normalize_token_value(item)}
+            elif isinstance(item, dict):
+                token_data = dict(item)
+                token_data["token"] = _normalize_token_value(token_data.get("token"))
+            else:
+                continue
+            if token_data.get("token"):
+                yield pool_name, token_data
+
+
+def _build_existing_map(tokens_data: dict) -> dict[str, dict[str, dict]]:
+    existing_map: dict[str, dict[str, dict]] = {}
+    for pool_name, token_data in _iter_token_items(tokens_data):
+        existing_map.setdefault(pool_name, {})[token_data["token"]] = token_data
+    return existing_map
+
+
+def _token_settings_payload() -> dict:
+    return {
+        "super_periodic_reset_enabled": bool(
+            get_config("token.super_periodic_reset_enabled", True)
+        ),
+        "super_periodic_reset_interval_minutes": int(
+            get_config(
+                "token.super_periodic_reset_interval_minutes",
+                DEFAULT_SUPER_PERIODIC_RESET_INTERVAL_MINUTES,
+            )
+            or DEFAULT_SUPER_PERIODIC_RESET_INTERVAL_MINUTES
+        ),
+        "super_periodic_reset_quota": int(
+            get_config(
+                "token.super_periodic_reset_quota",
+                DEFAULT_SUPER_PERIODIC_RESET_QUOTA,
+            )
+            or DEFAULT_SUPER_PERIODIC_RESET_QUOTA
+        ),
+        "video_stats_redis_url": str(
+            get_config("token.video_stats_redis_url", "") or ""
+        ),
+    }
 
 
 @router.get("/tokens", dependencies=[Depends(verify_app_key)])
@@ -20,7 +83,83 @@ async def get_tokens():
     """获取所有 Token"""
     storage = get_storage()
     tokens = await storage.load_tokens()
-    return tokens or {}
+    tokens = deepcopy(tokens or {})
+
+    raw_tokens = []
+    for _, token_data in _iter_token_items(tokens):
+        raw_tokens.append(token_data["token"])
+
+    counts = await VideoStatsService.get_success_counts(raw_tokens)
+    for _, token_data in _iter_token_items(tokens):
+        token_data["video_success_24h"] = counts.get(token_data["token"], 0)
+
+    return tokens
+
+
+@router.get("/tokens/settings", dependencies=[Depends(verify_app_key)])
+async def get_token_settings():
+    """获取 token 管理页相关设置。"""
+    return {"status": "success", "settings": _token_settings_payload()}
+
+
+@router.post("/tokens/settings", dependencies=[Depends(verify_app_key)])
+async def update_token_settings(data: dict):
+    """更新 token 管理页相关设置。"""
+    try:
+        enabled = bool(data.get("super_periodic_reset_enabled", True))
+        interval = int(
+            data.get(
+                "super_periodic_reset_interval_minutes",
+                DEFAULT_SUPER_PERIODIC_RESET_INTERVAL_MINUTES,
+            )
+        )
+        quota = int(
+            data.get(
+                "super_periodic_reset_quota",
+                DEFAULT_SUPER_PERIODIC_RESET_QUOTA,
+            )
+        )
+        redis_url = str(data.get("video_stats_redis_url", "") or "").strip()
+
+        if interval < 1:
+            raise HTTPException(status_code=400, detail="Interval must be >= 1 minute")
+        if quota < 0:
+            raise HTTPException(status_code=400, detail="Quota must be >= 0")
+
+        await config.update(
+            {
+                "token": {
+                    "super_periodic_reset_enabled": enabled,
+                    "super_periodic_reset_interval_minutes": interval,
+                    "super_periodic_reset_quota": quota,
+                    "video_stats_redis_url": redis_url,
+                }
+            }
+        )
+        await VideoStatsService.close()
+        return {"status": "success", "settings": _token_settings_payload()}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/tokens/super-reset", dependencies=[Depends(verify_app_key)])
+async def reset_super_quota_now():
+    """立即重置 ssoSuper 池额度。"""
+    try:
+        mgr = await get_token_manager()
+        quota = int(
+            get_config(
+                "token.super_periodic_reset_quota",
+                DEFAULT_SUPER_PERIODIC_RESET_QUOTA,
+            )
+            or DEFAULT_SUPER_PERIODIC_RESET_QUOTA
+        )
+        result = await mgr.reset_pool_quota(SUPER_POOL_NAME, quota)
+        return {"status": "success", "quota": quota, "result": result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/tokens", dependencies=[Depends(verify_app_key)])
@@ -34,40 +173,21 @@ async def update_tokens(data: dict):
             existing = await storage.load_tokens() or {}
             normalized = {}
             allowed_fields = set(TokenInfo.model_fields.keys())
-            existing_map = {}
-            for pool_name, tokens in existing.items():
-                if not isinstance(tokens, list):
-                    continue
-                pool_map = {}
-                for item in tokens:
-                    if isinstance(item, str):
-                        token_data = {"token": item}
-                    elif isinstance(item, dict):
-                        token_data = dict(item)
-                    else:
-                        continue
-                    raw_token = token_data.get("token")
-                    if isinstance(raw_token, str) and raw_token.startswith("sso="):
-                        token_data["token"] = raw_token[4:]
-                    token_key = token_data.get("token")
-                    if isinstance(token_key, str):
-                        pool_map[token_key] = token_data
-                existing_map[pool_name] = pool_map
+            existing_map = _build_existing_map(existing)
             for pool_name, tokens in (data or {}).items():
                 if not isinstance(tokens, list):
                     continue
                 pool_list = []
                 for item in tokens:
                     if isinstance(item, str):
-                        token_data = {"token": item}
+                        token_data = {"token": _normalize_token_value(item)}
                     elif isinstance(item, dict):
                         token_data = dict(item)
+                        token_data["token"] = _normalize_token_value(
+                            token_data.get("token")
+                        )
                     else:
                         continue
-
-                    raw_token = token_data.get("token")
-                    if isinstance(raw_token, str) and raw_token.startswith("sso="):
-                        token_data["token"] = raw_token[4:]
 
                     base = existing_map.get(pool_name, {}).get(
                         token_data.get("token"), {}
@@ -90,6 +210,83 @@ async def update_tokens(data: dict):
             mgr = await get_token_manager()
             await mgr.reload()
         return {"status": "success", "message": "Token 已更新"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/tokens/import", dependencies=[Depends(verify_app_key)])
+async def import_tokens(data: dict):
+    """批量导入 token，避免整表回写造成页面卡顿。"""
+    storage = get_storage()
+    try:
+        from app.services.token.models import TokenInfo
+
+        pool_name = str(data.get("pool_name") or "ssoBasic").strip() or "ssoBasic"
+        tokens = data.get("tokens")
+        if not isinstance(tokens, list):
+            raise HTTPException(status_code=400, detail="tokens must be a list")
+
+        quota = data.get("quota")
+        quota = int(quota) if quota is not None else None
+        note = str(data.get("note") or "").strip()[:50]
+
+        normalized_inputs = []
+        seen = set()
+        for value in tokens:
+            token = _normalize_token_value(value)
+            if token and token not in seen:
+                seen.add(token)
+                normalized_inputs.append(token)
+
+        if not normalized_inputs:
+            raise HTTPException(status_code=400, detail="No valid tokens provided")
+
+        allowed_fields = set(TokenInfo.model_fields.keys())
+
+        async with storage.acquire_lock("tokens_save", timeout=20):
+            existing = await storage.load_tokens() or {}
+            existing_map = _build_existing_map(existing)
+            global_existing = {
+                token
+                for pool_tokens in existing_map.values()
+                for token in pool_tokens.keys()
+            }
+
+            pool_tokens = list(existing.get(pool_name) or [])
+            imported = 0
+            skipped = 0
+
+            for token in normalized_inputs:
+                if token in global_existing:
+                    skipped += 1
+                    continue
+                payload = {"token": token}
+                if quota is not None:
+                    payload["quota"] = quota
+                if note:
+                    payload["note"] = note
+                payload = {k: v for k, v in payload.items() if k in allowed_fields}
+                info = TokenInfo(**payload)
+                pool_tokens.append(info.model_dump())
+                global_existing.add(token)
+                imported += 1
+
+            existing[pool_name] = pool_tokens
+            await storage.save_tokens(existing)
+            mgr = await get_token_manager()
+            await mgr.reload()
+
+        return {
+            "status": "success",
+            "summary": {
+                "requested": len(normalized_inputs),
+                "imported": imported,
+                "skipped": skipped,
+                "pool_name": pool_name,
+            },
+        }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

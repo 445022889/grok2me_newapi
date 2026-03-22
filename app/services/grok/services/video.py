@@ -34,6 +34,7 @@ from app.services.reverse.media_post import MediaPostReverse
 from app.services.reverse.video_upscale import VideoUpscaleReverse
 from app.services.reverse.utils.session import ResettableSession
 from app.services.token.manager import BASIC_POOL_NAME
+from app.services.token.video_stats import VideoStatsService
 
 _VIDEO_SEMAPHORE = None
 _VIDEO_SEM_VALUE = 0
@@ -872,6 +873,7 @@ class VideoStreamProcessor(BaseProcessor):
                                 rendered = await dl_service.render_video(
                                     video_url, self.token, thumbnail_url
                                 )
+                                await VideoStatsService.record_success(self.token)
                                 yield self._sse(rendered)
                                 logger.info(f"Video generated: {video_url}")
                             else:
@@ -1022,6 +1024,7 @@ class VideoCollectProcessor(BaseProcessor):
                                 content = await dl_service.render_video(
                                     video_url, self.token, thumbnail_url
                                 )
+                                await VideoStatsService.record_success(self.token)
                                 logger.info(f"Video generated: {video_url}")
                             else:
                                 logger.warning(

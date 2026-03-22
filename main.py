@@ -102,9 +102,11 @@ async def lifespan(app: FastAPI):
     cf_refresh_stop()
 
     from app.core.storage import StorageFactory
+    from app.services.token.video_stats import VideoStatsService
 
     if StorageFactory._instance:
         await StorageFactory._instance.close()
+    await VideoStatsService.close()
 
     if refresh_enabled:
         scheduler = get_scheduler()
