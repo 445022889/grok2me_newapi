@@ -74,12 +74,17 @@ docker compose up -d
 
 **功能说明**：
 
-- **Token 管理**：导入/添加/删除 Token，查看状态和配额
+- **Token 管理**：导入/添加/删除 Token，查看状态、配额与单个 Token 近 24 小时成功视频数
 - **状态筛选**：按状态（正常/限流/失效）或 NSFW 状态筛选
 - **批量操作**：批量刷新、导出、删除、开启 NSFW
+- **视频额度设置**：在 Token 页直接设置 `ssoSuper` 的定时重置开关、重置间隔、重置额度，并支持立即刷新
 - **NSFW 开启**：一键为 Token 开启 Unhinged 模式（需代理或 `cf_clearance`）
 - **配置管理**：在线修改系统配置
 - **缓存管理**：查看和清理媒体缓存
+
+> Token 页的“批量导入”已改为增量导入接口，不再整表回写，更适合大量 Token 场景。
+>
+> 24 小时视频成功数统计默认关闭；可在 Token 页填写 Redis，或通过环境变量 `TOKEN_VIDEO_STATS_REDIS_URL` 配置。
 
 <br>
 
@@ -92,6 +97,7 @@ docker compose up -d
 | `LOG_LEVEL` | 日志级别 | `INFO` | `DEBUG` |
 | `LOG_FILE_ENABLED` | 是否启用文件日志 | `true` | `false` |
 | `DATA_DIR` | 数据目录（配置/Token/锁） | `./data` | `/data` |
+| `TOKEN_VIDEO_STATS_REDIS_URL` | Token 视频成功统计 Redis 地址（可选，优先于后台配置） | `""` | `redis://:password@host:6379/5` |
 | `SERVER_HOST` | 服务监听地址 | `0.0.0.0` | `0.0.0.0` |
 | `SERVER_PORT` | 服务端口 | `8000` | `8000` |
 | `HOST_PORT` | Docker Compose 宿主机映射端口 | `8000` | `9000` |
@@ -388,6 +394,10 @@ curl http://localhost:8000/v1/images/edits \
 | **token** | `auto_refresh` | 自动刷新 | 是否开启 Token 自动刷新机制。 | `true` |
 |  | `refresh_interval_hours` | 刷新间隔 | 普通 Token 刷新的时间间隔（小时）。 | `8` |
 |  | `super_refresh_interval_hours` | Super 刷新间隔 | Super Token 刷新的时间间隔（小时）。 | `2` |
+|  | `super_periodic_reset_enabled` | Super 定时重置开关 | 是否启用 `ssoSuper` 周期性额度重置。 | `true` |
+|  | `super_periodic_reset_interval_minutes` | Super 定时重置间隔 | `ssoSuper` 周期性额度重置间隔（分钟）。 | `15` |
+|  | `super_periodic_reset_quota` | Super 定时重置额度 | `ssoSuper` 每次重置到的额度值。 | `140` |
+|  | `video_stats_redis_url` | 视频成功统计 Redis | 单个 Token 24 小时成功视频数统计所用 Redis 地址；留空则关闭。 | `""` |
 |  | `fail_threshold` | 失败阈值 | 单个 Token 连续失败多少次后被标记为不可用。 | `5` |
 |  | `save_delay_ms` | 保存延迟 | Token 变更合并写入的延迟（毫秒）。 | `500` |
 |  | `usage_flush_interval_sec` | 用量落库间隔 | 用量类字段写入数据库的最小间隔（秒）。 | `5` |

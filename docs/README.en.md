@@ -74,12 +74,17 @@ docker compose up -d
 
 **Features**:
 
-- **Token Management**: import/add/delete tokens, view status and quota
+- **Token Management**: import/add/delete tokens, view status, quota, and 24h successful video count per token
 - **Status Filter**: filter by status (active/limited/expired) or NSFW status
 - **Batch Ops**: batch refresh/export/delete/enable NSFW
+- **Video Quota Controls**: configure `ssoSuper` scheduled reset switch, interval, quota, and trigger reset immediately from the Token page
 - **NSFW Enable**: one-click Unhinged for tokens (proxy or `cf_clearance` required)
 - **Config Management**: update system config online
 - **Cache Management**: view and clear media cache
+
+> Batch import on the Token page now uses an incremental import API instead of rewriting the whole token list, which is more stable for large token pools.
+>
+> 24h video success stats are disabled by default; configure Redis on the Token page or via `TOKEN_VIDEO_STATS_REDIS_URL`.
 
 <br>
 
@@ -92,6 +97,7 @@ docker compose up -d
 | `LOG_LEVEL` | Log level | `INFO` | `DEBUG` |
 | `LOG_FILE_ENABLED` | Enable file logging | `true` | `false` |
 | `DATA_DIR` | Data dir (config/tokens/locks) | `./data` | `/data` |
+| `TOKEN_VIDEO_STATS_REDIS_URL` | Redis URL for token video success stats (optional, overrides admin setting) | `""` | `redis://:password@host:6379/5` |
 | `SERVER_HOST` | Bind address | `0.0.0.0` | `0.0.0.0` |
 | `SERVER_PORT` | Server port | `8000` | `8000` |
 | `HOST_PORT` | Host published port for Docker Compose | `8000` | `9000` |
@@ -387,6 +393,10 @@ Config file: `data/config.toml`
 | **token** | `auto_refresh` | Auto refresh | Enable token auto refresh. | `true` |
 |  | `refresh_interval_hours` | Refresh interval | Basic token refresh interval (hours). | `8` |
 |  | `super_refresh_interval_hours` | Super refresh interval | Super token refresh interval (hours). | `2` |
+|  | `super_periodic_reset_enabled` | Super periodic reset switch | Enable periodic quota reset for `ssoSuper`. | `true` |
+|  | `super_periodic_reset_interval_minutes` | Super periodic reset interval | Periodic quota reset interval for `ssoSuper` (minutes). | `15` |
+|  | `super_periodic_reset_quota` | Super periodic reset quota | Quota value applied on each `ssoSuper` reset. | `140` |
+|  | `video_stats_redis_url` | Video stats Redis | Redis URL used to count 24h successful videos per token; empty disables stats. | `""` |
 |  | `fail_threshold` | Fail threshold | Consecutive failures to disable. | `5` |
 |  | `save_delay_ms` | Save delay | Merge write delay (ms). | `500` |
 |  | `usage_flush_interval_sec` | Usage flush interval | Minimum interval to flush usage fields to DB (seconds). | `5` |
