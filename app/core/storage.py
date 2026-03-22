@@ -169,6 +169,21 @@ class LocalStorage(BaseStorage):
         self._locks_guard = asyncio.Lock()
         self._named_locks: dict[str, asyncio.Lock] = {}
 
+    @staticmethod
+    def _should_use_file_lock() -> bool:
+        if fcntl is None:
+            return False
+
+        override = os.getenv("LOCAL_STORAGE_FILE_LOCK", "").strip().lower()
+        if override:
+            return override in ("1", "true", "yes", "on")
+
+        try:
+            workers = int(os.getenv("SERVER_WORKERS", "1"))
+        except (TypeError, ValueError):
+            workers = 1
+        return workers > 1
+
     async def _get_named_lock(self, name: str) -> asyncio.Lock:
         async with self._locks_guard:
             lock = self._named_locks.get(name)
@@ -190,7 +205,7 @@ class LocalStorage(BaseStorage):
             logger.warning(f"LocalStorage: 获取锁 '{name}' 超时 ({timeout}s)")
             raise StorageError(f"无法获取锁 '{name}'")
 
-        if fcntl is None:
+        if not self._should_use_file_lock():
             try:
                 yield
             finally:
@@ -237,70 +252,76 @@ class LocalStorage(BaseStorage):
         if not CONFIG_FILE.exists():
             return {}
         try:
-            async with aiofiles.open(CONFIG_FILE, "rb") as f:
-                content = await f.read()
-                return tomllib.loads(content.decode("utf-8"))
+            return await asyncio.to_thread(self._load_config_sync)
         except Exception as e:
             logger.error(f"LocalStorage: 加载配置失败: {e}")
             return {}
 
+    @staticmethod
+    def _load_config_sync() -> Dict[str, Any]:
+        with CONFIG_FILE.open("rb") as f:
+            return tomllib.load(f)
+
     async def save_config(self, data: Dict[str, Any]):
         try:
-            lines = []
-            for section, items in data.items():
-                if not isinstance(items, dict):
-                    continue
-                lines.append(f"[{section}]")
-                for key, val in items.items():
-                    if isinstance(val, bool):
-                        val_str = "true" if val else "false"
-                    elif isinstance(val, str):
-                        # Use JSON string escaping to keep TOML valid for multiline/control chars.
-                        val_str = json_dumps(val)
-                    elif isinstance(val, (int, float)):
-                        val_str = str(val)
-                    elif isinstance(val, (list, dict)):
-                        val_str = json_dumps(val)
-                    else:
-                        val_str = f'"{str(val)}"'
-                    lines.append(f"{key} = {val_str}")
-                lines.append("")
-
-            content = "\n".join(lines)
-
-            CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-            async with aiofiles.open(CONFIG_FILE, "w", encoding="utf-8") as f:
-                await f.write(content)
+            await asyncio.to_thread(self._save_config_sync, data)
         except Exception as e:
             logger.error(f"LocalStorage: 保存配置失败: {e}")
             raise StorageError(f"保存配置失败: {e}")
+
+    @staticmethod
+    def _save_config_sync(data: Dict[str, Any]):
+        lines = []
+        for section, items in data.items():
+            if not isinstance(items, dict):
+                continue
+            lines.append(f"[{section}]")
+            for key, val in items.items():
+                if isinstance(val, bool):
+                    val_str = "true" if val else "false"
+                elif isinstance(val, str):
+                    val_str = json_dumps(val)
+                elif isinstance(val, (int, float)):
+                    val_str = str(val)
+                elif isinstance(val, (list, dict)):
+                    val_str = json_dumps(val)
+                else:
+                    val_str = f'"{str(val)}"'
+                lines.append(f"{key} = {val_str}")
+            lines.append("")
+
+        content = "\n".join(lines)
+        CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = CONFIG_FILE.with_suffix(".tmp")
+        temp_path.write_text(content, encoding="utf-8")
+        os.replace(temp_path, CONFIG_FILE)
 
     async def load_tokens(self) -> Dict[str, Any]:
         if not TOKEN_FILE.exists():
             return {}
         try:
-            async with aiofiles.open(TOKEN_FILE, "rb") as f:
-                content = await f.read()
-                return json_loads(content)
+            return await asyncio.to_thread(self._load_tokens_sync)
         except Exception as e:
             logger.error(f"LocalStorage: 加载 Token 失败: {e}")
             return {}
 
+    @staticmethod
+    def _load_tokens_sync() -> Dict[str, Any]:
+        return json_loads(TOKEN_FILE.read_bytes())
+
     async def save_tokens(self, data: Dict[str, Any]):
         try:
-            TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
-            temp_path = TOKEN_FILE.with_suffix(".tmp")
-
-            # 原子写操作: 写入临时文件 -> 重命名
-            async with aiofiles.open(temp_path, "wb") as f:
-                await f.write(orjson.dumps(data, option=orjson.OPT_INDENT_2))
-
-            # 使用 os.replace 保证原子性
-            os.replace(temp_path, TOKEN_FILE)
-
+            await asyncio.to_thread(self._save_tokens_sync, data)
         except Exception as e:
             logger.error(f"LocalStorage: 保存 Token 失败: {e}")
             raise StorageError(f"保存 Token 失败: {e}")
+
+    @staticmethod
+    def _save_tokens_sync(data: Dict[str, Any]):
+        TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = TOKEN_FILE.with_suffix(".tmp")
+        temp_path.write_bytes(orjson.dumps(data, option=orjson.OPT_INDENT_2))
+        os.replace(temp_path, TOKEN_FILE)
 
     async def close(self):
         pass
