@@ -46,6 +46,29 @@ def _iter_token_items(tokens_data: dict):
                 yield pool_name, token_data
 
 
+def _augment_tokens_with_video_stats(tokens_data: dict, counts: dict[str, int]) -> dict:
+    for pool_name, tokens in (tokens_data or {}).items():
+        if not isinstance(tokens, list):
+            continue
+        for index, item in enumerate(tokens):
+            if isinstance(item, str):
+                token = _normalize_token_value(item)
+                tokens[index] = {
+                    "token": token,
+                    "status": "active",
+                    "quota": 0,
+                    "note": "",
+                    "use_count": 0,
+                    "tags": [],
+                    "video_success_24h": counts.get(token, 0),
+                }
+            elif isinstance(item, dict):
+                token = _normalize_token_value(item.get("token"))
+                item["token"] = token
+                item["video_success_24h"] = counts.get(token, 0)
+    return tokens_data
+
+
 def _build_existing_map(tokens_data: dict) -> dict[str, dict[str, dict]]:
     existing_map: dict[str, dict[str, dict]] = {}
     for pool_name, token_data in _iter_token_items(tokens_data):
@@ -90,10 +113,7 @@ async def get_tokens():
         raw_tokens.append(token_data["token"])
 
     counts = await VideoStatsService.get_success_counts(raw_tokens)
-    for _, token_data in _iter_token_items(tokens):
-        token_data["video_success_24h"] = counts.get(token_data["token"], 0)
-
-    return tokens
+    return _augment_tokens_with_video_stats(tokens, counts)
 
 
 @router.get("/tokens/settings", dependencies=[Depends(verify_app_key)])
