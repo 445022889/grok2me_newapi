@@ -264,6 +264,7 @@ function updateStats(data) {
   let nsfwTokens = 0;
   let noNsfwTokens = 0;
   let chatQuota = 0;
+  let totalVideoSuccess24h = 0;
   let totalCalls = 0;
 
   flatTokens.forEach(t => {
@@ -280,6 +281,7 @@ function updateStats(data) {
     } else {
       noNsfwTokens++;
     }
+    totalVideoSuccess24h += Number(t.video_success_24h || 0);
     totalCalls += Number(t.use_count || 0);
   });
 
@@ -292,6 +294,7 @@ function updateStats(data) {
 
   setText('stat-chat-quota', chatQuota.toLocaleString());
   setText('stat-image-quota', imageQuota.toLocaleString());
+  setText('stat-video-quota', totalVideoSuccess24h.toLocaleString());
   setText('stat-total-calls', totalCalls.toLocaleString());
 
   updateTabCounts({
