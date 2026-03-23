@@ -11,7 +11,7 @@ let currentFilter = 'all';
 let currentBatchTaskId = null;
 let batchEventSource = null;
 let currentPage = 1;
-let pageSize = 50;
+let pageSize = 1000;
 let tokenSettings = null;
 
 const byId = (id) => document.getElementById(id);

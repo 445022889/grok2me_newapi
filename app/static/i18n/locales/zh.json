@@ -256,7 +256,7 @@
     "resetEnabled": "启用定时刷新",
     "resetInterval": "刷新间隔（分钟）",
     "resetQuota": "重置额度",
-    "resetNow": "立即刷新",
+    "resetNow": "立即刷新额度",
     "resetNowDone": "已立即刷新：更新 {updated} 个 Token，额度 {quota}",
     "resetNowFailed": "立即刷新失败: {msg}",
     "videoStatsRedisUrl": "视频统计 Redis",

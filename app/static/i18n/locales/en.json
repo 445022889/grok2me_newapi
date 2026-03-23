@@ -256,7 +256,7 @@
     "resetEnabled": "Enable scheduled reset",
     "resetInterval": "Reset interval (minutes)",
     "resetQuota": "Reset quota",
-    "resetNow": "Reset now",
+    "resetNow": "Refresh quota now",
     "resetNowDone": "Reset completed: {updated} tokens updated, quota {quota}",
     "resetNowFailed": "Reset failed: {msg}",
     "videoStatsRedisUrl": "Video stats Redis",
